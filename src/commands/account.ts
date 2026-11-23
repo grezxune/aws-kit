@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { log } from "../cli/output";
 import { defineCommand } from "../cli/registry";
-import { ACCOUNT_NAME, accountEmailFor, createAccount } from "../core/accounts";
+import { ACCOUNT_NAME, accountEmailFor, createAccount, RESERVED_ACCOUNT_NAMES } from "../core/accounts";
 import { regionsOf } from "../core/config";
 import { KitError } from "../core/errors";
+import { accessStep, IdentityCenter, profilesStep } from "../core/identity-center";
 import { readySteps } from "../core/ready-steps";
 import { orgClient, orgView, sessionFor } from "../core/sessions";
 import { runSteps, summarize } from "../core/steps";
@@ -23,7 +24,11 @@ export const accountCreate = defineCommand({
   summary: "Create a member account in the organization. Safe to rerun: an account with the name already there is returned as is.",
   mutates: true,
   options: z.object({
-    name: z.string().regex(ACCOUNT_NAME, "lowercase letters, digits, and hyphens, starting with a letter").describe("Account name, such as a project name. Commands and project configs refer to the account by it"),
+    name: z
+      .string()
+      .regex(ACCOUNT_NAME, "lowercase letters, digits, and hyphens, starting with a letter")
+      .refine((name) => !RESERVED_ACCOUNT_NAMES.includes(name), `cannot be ${RESERVED_ACCOUNT_NAMES.join(", ")}, which profile names use`)
+      .describe("Account name, such as a project name. Commands and project configs refer to the account by it"),
     email: z.email().optional().describe("Email for the account's root user. Defaults to the accountEmail template"),
     yes: z.boolean().default(false).describe("Create it. Without it, only report what would be created"),
   }),
@@ -38,14 +43,14 @@ export const accountCreate = defineCommand({
     const plan = { name: options.name, email, role: ctx.config.memberRole };
     if (!options.yes) return { applied: false, changed: false, wouldCreate: plan, next: [`Rerun with --yes to create it. AWS emails ${email}, and closing an account takes 90 days to finish.`] };
     log(`Creating account ${options.name} (${email}). This takes one to five minutes.`);
-    const id = await createAccount(orgClient(view.operator), { name: options.name, email, roleName: ctx.config.memberRole, tags: { "managed-by": "aws-kit" } }, { onProgress: (state) => log(`  ${state}`) });
+    const id = await createAccount(orgClient(view.management), { name: options.name, email, roleName: ctx.config.memberRole, tags: { "managed-by": "aws-kit" } }, { onProgress: (state) => log(`  ${state}`) });
     return { applied: true, changed: true, account: { id, name: options.name, email }, next: [`aws-kit account ready --account ${options.name} --yes`] };
   },
 });
 
 export const accountReady = defineCommand({
   name: "account ready",
-  summary: "Make an account ready for project stacks: CDK bootstrap, S3 Block Public Access, a monthly budget, an alerts topic, and billing tags. Safe to rerun.",
+  summary: "Make an account ready for project stacks: CDK bootstrap, S3 Block Public Access, a monthly budget, an alerts topic, billing tags, your Identity Center access, and its two AWS profiles. Safe to rerun.",
   mutates: true,
   options: z.object({
     account: z.string().min(1).describe("Account name, 12-digit ID, or management"),
@@ -55,7 +60,13 @@ export const accountReady = defineCommand({
   async run(options, ctx) {
     const view = await orgView(ctx);
     const { session, account } = await sessionFor(view, options.account, ctx.config.region, ctx.config);
-    const steps = readySteps({ session, operator: view.operator, config: ctx.config, regions: regionsOf(ctx.config), vercelTeam: options.vercelTeam });
+    const idc = new IdentityCenter(view.management, ctx.config);
+    const steps = [
+      ...readySteps({ session, management: view.management, config: ctx.config, regions: regionsOf(ctx.config), vercelTeam: options.vercelTeam }),
+      accessStep(idc, account, ctx.config.adminPermissionSet, { setMadeEarlier: false }),
+      accessStep(idc, account, ctx.config.readPermissionSet, { setMadeEarlier: false }),
+      profilesStep(idc, async () => [account]),
+    ];
     const results = await runSteps(steps, { apply: options.yes, log });
     return { applied: options.yes, account, steps: results, ...summarize(results) };
   },

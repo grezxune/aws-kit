@@ -24,6 +24,9 @@ export interface OrgAccount {
 /** Lowercase words and hyphens. The name is how every command and every project config refers to an account. */
 export const ACCOUNT_NAME = /^[a-z][a-z0-9-]{0,48}[a-z0-9]$/;
 
+/** Names a new account cannot take, because commands or profile names already mean something by them. */
+export const RESERVED_ACCOUNT_NAMES = ["management", "read", "root"];
+
 export async function describeOrg(client: OrganizationsClient): Promise<Org | null> {
   try {
     const { Organization: org } = await client.send(new DescribeOrganizationCommand({}));

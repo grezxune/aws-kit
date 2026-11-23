@@ -22,8 +22,8 @@ const KIT_TAGS = [{ Key: "managed-by", Value: "aws-kit" }];
 export interface ReadyInput {
   /** A session in the account being made ready, in its default region. */
   session: Session;
-  /** The operator's session in the management account, for org-wide billing settings. */
-  operator: Session;
+  /** The kit's session in the management account, for org-wide billing settings. */
+  management: Session;
   config: Config;
   regions: string[];
   vercelTeam?: string;
@@ -160,8 +160,8 @@ export function vercelOidcStep(session: Session, team: string): Step {
   };
 }
 
-function costTagsStep(operator: Session): Step {
-  const ce = new CostExplorerClient({ region: "us-east-1", credentials: operator.credentials });
+function costTagsStep(management: Session): Step {
+  const ce = new CostExplorerClient({ region: "us-east-1", credentials: management.credentials });
   let inactive: string[] = [];
   return {
     id: "cost-allocation-tags",
@@ -170,7 +170,7 @@ function costTagsStep(operator: Session): Step {
         if (isAwsError(error, "AccessDeniedException")) return null;
         throw error;
       });
-      if (!listed) return { needed: true, manual: true, detail: "The operator cannot read billing. As root, turn on IAM user and role access to Billing information in the console, under Account." };
+      if (!listed) return { needed: true, manual: true, detail: "The kit's session cannot read billing. As root, turn on IAM user and role access to Billing information in the console, under Account." };
       const tags = listed.CostAllocationTags ?? [];
       const missing = COST_TAGS.filter((key) => !tags.some((tag) => tag.TagKey === key));
       inactive = tags.filter((tag) => tag.Status !== "Active").map((tag) => tag.TagKey ?? "");
@@ -186,13 +186,13 @@ function costTagsStep(operator: Session): Step {
 }
 
 export function readySteps(input: ReadyInput): Step[] {
-  const { session, operator, config, regions, vercelTeam } = input;
+  const { session, management, config, regions, vercelTeam } = input;
   return [
     ...regions.map((region) => cdkBootstrapStep(session, region)),
     blockPublicAccessStep(session),
     budgetStep(session, config),
     ...regions.flatMap((region) => alertsSteps(session, region, config)),
     ...(vercelTeam ? [vercelOidcStep(session, vercelTeam)] : []),
-    costTagsStep(operator),
+    costTagsStep(management),
   ];
 }

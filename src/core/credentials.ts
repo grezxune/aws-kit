@@ -29,7 +29,12 @@ export function identityKind(arn: string): Identity["kind"] {
   return "other";
 }
 
-const SIGN_IN_ERRORS = ["CredentialsProviderError", "ExpiredToken", "ExpiredTokenException", "InvalidClientTokenId", "TokenRefreshRequired"];
+const SIGN_IN_ERRORS = ["CredentialsProviderError", "TokenProviderError", "ExpiredToken", "ExpiredTokenException", "InvalidClientTokenId", "TokenRefreshRequired", "UnauthorizedException"];
+
+/** The permission set behind an Identity Center role session, from an ARN like .../AWSReservedSSO_AwsKitAdmin_0123abcd/me. */
+export function permissionSetOf(arn: string): string | undefined {
+  return /:assumed-role\/AWSReservedSSO_(.+)_[0-9a-f]+\//.exec(arn)?.[1];
+}
 
 /** True when ~/.aws/config or ~/.aws/credentials defines the profile. */
 export async function profileExists(profile: string): Promise<boolean> {
@@ -37,14 +42,19 @@ export async function profileExists(profile: string): Promise<boolean> {
   return profile in configFile || profile in credentialsFile;
 }
 
+/** The command that signs a profile in: `aws sso login` for Identity Center profiles, `aws login` for the rest. */
+export async function signInCommand(profile: string): Promise<string> {
+  const { configFile } = await loadSharedConfigFiles();
+  const data = configFile[profile] ?? {};
+  return data.sso_session || data.sso_start_url ? `aws sso login --profile ${profile}` : `aws login --profile ${profile}`;
+}
+
 /**
  * A session from a named profile. Any kind the AWS CLI writes works: `aws login`, SSO, a role, or an access key.
  * It reads only the profile, never the EC2 metadata endpoint, which would make a missing profile hang for minutes.
  */
-export async function profileSession(profile: string, region: string): Promise<Session> {
-  if (!(await profileExists(profile))) {
-    throw new KitError("not_signed_in", `No AWS profile named ${profile}.`, `Sign in to create it: aws login --profile ${profile}`);
-  }
+export async function profileSession(profile: string, region: string, missingHint = `Sign in to create it: aws login --profile ${profile}`): Promise<Session> {
+  if (!(await profileExists(profile))) throw new KitError("not_signed_in", `No AWS profile named ${profile}.`, missingHint);
   const credentials = fromIni({ profile });
   try {
     const resolved = await credentials();
@@ -58,12 +68,20 @@ export async function profileSession(profile: string, region: string): Promise<S
       identity: { accountId: me.Account ?? "", arn, kind: identityKind(arn), longLivedKey: resolved.accessKeyId.startsWith("AKIA") },
     };
   } catch (error) {
-    const name = awsErrorName(error);
-    if (name && SIGN_IN_ERRORS.includes(name)) {
-      throw new KitError("not_signed_in", `Profile ${profile} has no working credentials: ${(error as Error).message}`, `Run: aws login --profile ${profile}`);
-    }
-    throw error;
+    throw (await signInError(error, profile)) ?? error;
   }
+}
+
+/** Turns a credential failure into the kit error that says what to do, or undefined for anything else. */
+export async function signInError(error: unknown, profile: string): Promise<KitError | undefined> {
+  const name = awsErrorName(error);
+  const message = error instanceof Error ? error.message : String(error);
+  // The SSO provider wraps GetRoleCredentials failures, so a missing assignment shows up only in the message.
+  if (name === "ForbiddenException" || /ForbiddenException|No access/i.test(message)) {
+    return new KitError("no_access", `Profile ${profile} names an account or permission set your Identity Center user has not been given.`, "Give it access with aws-kit account ready --account <name> --yes, or aws-kit bootstrap --yes for the management account.");
+  }
+  if (name && SIGN_IN_ERRORS.includes(name)) return new KitError("not_signed_in", `Profile ${profile} has no working credentials: ${message}`, `Run: ${await signInCommand(profile)}`);
+  return undefined;
 }
 
 /** A session in a member account, through the role AWS Organizations puts in every account it creates. */
@@ -72,7 +90,7 @@ export function assumedSession(base: Session, accountId: string, roleName: strin
     throw new KitError(
       "root_cannot_assume",
       "AWS does not let the root user assume roles, so root credentials cannot reach member accounts.",
-      "Run aws-kit bootstrap as root once, then sign in as the operator user: aws login --profile <operatorProfile>.",
+      "Run aws-kit bootstrap as root once, then sign in through Identity Center: aws sso login --profile aws-kit.",
     );
   }
   const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;

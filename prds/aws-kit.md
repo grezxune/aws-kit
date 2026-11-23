@@ -5,7 +5,7 @@ status: draft
 
 ## Problem
 
-Vercel and Convex host most of the developer's apps and stay the default. Some projects need something from AWS, and which service is not known in advance. Today each project provisions AWS by hand or through an in-app admin setup tool, signed in with a long-lived IAM access key. Nothing records which resources belong to which project, so teardown is manual and forgotten resources keep billing. Everything also sits in one account, with no path to give a project its own account once it has real users or a paying client. The developer wants one local tool, started from the root sign-in, that agents drive to create accounts and provision resources. They want to ask an agent for any AWS service in plain language, get it deployed and connected to the app, remove it with one request, and move a project to its own account later without rebuilding it.
+Vercel and Convex host most of the developer's apps and stay the default. Some projects need something from AWS, and which service is not known in advance. Today each project provisions AWS by hand or through an in-app admin setup tool, signed in with a long-lived IAM access key. Nothing records which resources belong to which project, so teardown is manual and forgotten resources keep billing. Everything also sits in one account, with no path to give a project its own account once it has real users or a paying client. The developer wants one local tool, started from the root sign-in, that agents drive to create accounts and provision resources. They want to ask an agent for any AWS service in plain language, get it deployed and connected to the app, remove it with one request, and move a project to its own account later without rebuilding it. Agents on the machine also load AWS's own skills and MCP server, which call any AWS API with whatever credentials they find. The limits therefore have to live in AWS, not only in the kit's instructions.
 
 ## Goals
 
@@ -15,6 +15,7 @@ Vercel and Convex host most of the developer's apps and stay the default. Some p
 - A project stage moves from the shared account to its own account by changing one config value and running one command. Stateless resources need no manual steps.
 - One command lists every project, stage, account, resource type, and month-to-date cost.
 - The laptop and Vercel hold no long-lived AWS access keys.
+- One sign-in reaches every account. Agents read AWS by default, and AWS itself enforces guardrails in every project account.
 
 ## Non-goals
 
@@ -33,8 +34,11 @@ One developer, working through Claude Code inside a project repo.
 Set up, once:
 
 1. Sign in as root in the browser with `aws login`.
-2. Run bootstrap. It creates the organization and an operator user.
-3. Turn on console sign-in and MFA for the operator, then sign in as the operator with `aws login`. Root signs out.
+2. Run bootstrap. It creates the organization and the guardrail policy, then reports two console steps: turn on IAM Identity Center, and add yourself as its user.
+3. Run bootstrap again. It creates an admin and a read-only permission set, gives you both in the management account, and writes your AWS profiles.
+4. Sign in with `aws sso login --profile aws-kit`. Root signs out and stays out.
+
+Every day: one `aws sso login` covers every account for up to 12 hours.
 
 Add an account: ask for one by name. The agent shows the name and email, the developer confirms, the agent creates it and makes it ready.
 
@@ -56,15 +60,16 @@ Move: ask to give a project stage its own account. The agent shows a plan per re
 
 ## Requirements
 
-### R1 (P0): Sign-in uses a browser session and no stored access key
-- Given a root sign-in, when bootstrap runs and is confirmed, then an organization and an operator user with administrator access exist. Run again, it changes nothing.
-- Given a new terminal, when the agent first needs AWS, then one browser sign-in as the operator covers the rest of the working day.
-- Given the root profile, when a command needs a member account, then it fails with `root_cannot_assume` and says to sign in as the operator.
+### R1 (P0): Sign-in uses IAM Identity Center and no stored access key
+- Given a root sign-in, when bootstrap runs and is confirmed, then an organization, the guardrail policy from R19, an admin and a read-only permission set, the developer's access to the management account, and their AWS profiles exist. A step AWS allows only in the console is reported with instructions. Run again, it changes nothing.
+- Given a new terminal, when the agent first needs AWS, then one `aws sso login` covers every account for up to 12 hours.
+- Given the root profile, when a command needs a member account, then it fails with `root_cannot_assume` and says to sign in through Identity Center.
 - Given setup is complete, when `~/.aws/credentials` is inspected, then it holds no access key.
 
 ### R2 (P0): One command makes any account ready
 - Given a signed-in session and any AWS account, shared or project, when the ready command runs, then the account has CDK bootstrap resources, a monthly budget with an email alert, Vercel registered as an OIDC identity provider, and `project` and `stage` active as cost allocation tags.
 - Given an account that is already ready, when the command runs again, then it changes nothing and exits 0.
+- Given an account that is ready, then the developer has the admin and the read-only permission set in it, and `~/.aws/config` has a profile for each, named after the account.
 
 ### R3 (P0): Any AWS service can be added through the same flow
 - Given a service with CloudFormation resource types, when the developer asks for it and confirms, then it deploys as part of the project's stack.
@@ -131,8 +136,8 @@ Move: ask to give a project stage its own account. The agent shows a plan per re
 - Given a resource type with no default alarm, when the diff is shown, then it says so for that resource.
 
 ### R16 (P0): One command creates an account for a project
-- Given the operator session, when account create runs without confirmation, then it reports the name, email, and access role it would use and changes nothing.
-- Given confirmation, then the account exists in the organization within 15 minutes, tagged `managed-by=aws-kit`, and the operator can act in it through `OrganizationAccountAccessRole`.
+- Given the kit's session, when account create runs without confirmation, then it reports the name, email, and access role it would use and changes nothing.
+- Given confirmation, then the account exists in the organization within 15 minutes, tagged `managed-by=aws-kit`, and the kit can act in it through `OrganizationAccountAccessRole`.
 - Given an account with that name already exists, then the command returns it and creates nothing.
 - Given an email another account already uses, then the command refuses before calling AWS.
 
@@ -141,6 +146,17 @@ Move: ask to give a project stage its own account. The agent shows a plan per re
 - Given the help command, then every command and flag is listed as data, with types, defaults, and descriptions.
 - Given a command that changes AWS or files, when it runs without `--yes`, then it changes nothing and reports what it would do.
 
+### R18 (P0): Agents read AWS by default
+- Given any account the kit manages, when a tool signs in with that account's read-only profile, then AWS denies every change.
+- Given `exec` without `--write`, when it runs a command, then the command gets read-only credentials.
+- Given the AWS MCP Server on the machine, when it starts, then it signs in with a read-only profile.
+- Given a kit command that changes AWS, when it runs, then it uses the admin permission set and still follows R6 and R17.
+
+### R19 (P0): AWS enforces guardrails in every member account
+- Given the organization, when bootstrap runs and is confirmed, then one service control policy is attached to the organization root, so every member account gets it with no per-account step.
+- Given any member account, when anyone tries to leave the organization, act as that account's root user, or change `OrganizationAccountAccessRole`, then AWS denies it.
+- Given the kit's policy content changes, when bootstrap runs again, then the attached policy is updated to match.
+
 ## Constraints
 
 - AWS has no operation that moves a resource between accounts. A move is a redeploy plus a data copy plus a cutover. R9 exists so the redeploy part is always free.
@@ -148,15 +164,17 @@ Move: ask to give a project stage its own account. The agent shows a plan per re
 - A snapshot encrypted with an AWS-managed key cannot be shared with another account. The move step first copies it under a customer-managed key.
 - Creating project accounts needs an AWS Organization. A standalone account can create one at any time, and bootstrap does.
 - AWS does not let the root user call AssumeRole, so root credentials cannot act inside member accounts. Root is used for bootstrap only.
+- IAM Identity Center can be turned on for an organization only in the console. The API that creates an instance refuses the management account. Bootstrap reports it as a manual step.
+- Service control policies never apply to the management account. It runs no project stacks, so the guardrails cover every account that does.
 - Making S3 Block Public Access account-wide cuts off any bucket that is public today. Account readiness checks for public buckets and leaves the setting for a person when it finds one.
 - Project stacks are self-contained. They share nothing with other projects except what R2 puts in the account. A shared VPC or database across projects would break R9.
-- The everyday session can do anything in the account. R6 and R8 stop a wrong deploy or stack delete. They do not stop an agent from emptying a bucket through the AWS CLI. R12 closes most of that gap for prod.
+- The kit's own session has the admin permission set, which can do anything in an account. R6 and R8 stop a wrong deploy or stack delete through the kit. An agent with a shell can still name an admin profile itself, so R18's read-only default narrows the gap without closing it. R19, and R12 once built, are what AWS enforces.
 - When a service is reached from Vercel over the internet, it requires IAM auth and TLS. Verify per service with a test that an unauthenticated connection fails.
 - Each Vercel OIDC role trusts one Vercel team and project. Verify with an assertion on the synthesized trust policy.
 - The access key now in `~/.aws/credentials` gets deleted in IAM once R1 works. The developer does this step.
 - The kit works in any Claude Code session on the developer's machine, because the skill is installed at user level and deploys use that machine's AWS sign-in. Cloud sessions and the claude.ai chat app cannot deploy in the first release.
 - Deploy and destroy stay out of the Claude Code allowlist, so each run prompts.
-- `aws login` needs AWS CLI 2.32 or later. The installed version is 2.17.42.
+- `aws login`, used for the root sign-in, needs AWS CLI 2.32 or later.
 - R3, R5, and R10 can only be accepted against real deploys. Use scratch projects and destroy them after.
 
 ## Open questions
@@ -171,12 +189,12 @@ Move: ask to give a project stage its own account. The agent shows a plan per re
 - 2026-10-03: CDK in TypeScript. The requirement to move accounts means a project's infrastructure has to exist as account-neutral code, and CloudFormation keeps the state inside the AWS account, so there is no local state file to go stale. CDK reaches every CloudFormation resource type, and a custom resource covers APIs CloudFormation lacks.
 - 2026-10-03: One stack per project stage, named `{project}-{stage}`. The target account and region are config values per stage. Projects start in the shared account.
 - 2026-10-03: No separate accounts or roles for prod in the first release. The developer does not need permission separation. Protection is keyed on the stage name (R8), and R12 adds an account-wide tag guard that needs no per-project work.
-- 2026-10-03: The AWS MCP Server, installed through the `aws-core` plugin, supplies docs, reads, troubleshooting, and scratch experiments across all AWS APIs. Anything kept goes into the stack, because a resource outside a stack cannot be listed, destroyed, or moved by the kit.
+- 2026-10-03: The AWS MCP Server, installed through the `aws-core` plugin, supplies docs, reads, troubleshooting, and scratch experiments across all AWS APIs. Anything kept goes into the stack, because a resource outside a stack cannot be listed, destroyed, or moved by the kit. Superseded on 2026-11-23 by the Agent Toolkit decision.
 - 2026-10-03: The kit is three parts. A small library and CLI in their own repo, a Claude Code skill with the conventions, and an `infra/` CDK app in each project that pins a kit version.
 - 2026-10-03: Service-specific choices, such as how Vercel reaches Postgres, are made per project when the service is first added, and recorded in that project's PRD.
 - 2026-10-05: Baseline observability is part of the base stack (R15), applied the same way as tags and prod protection. A project that forgets to add alarms still gets them, and the first project to use the kit depends on that.
 - 2026-10-03: R6 is enforced in the CLI. Diff records a hash of the synthesized template, and deploy refuses when the current hash differs.
-- 2026-11-22: The developer gives the tool the root user, and the tool uses it once. AWS does not let root assume roles, so bootstrap turns the root sign-in into an organization and an operator IAM user, and every other command signs in as the operator with `aws login`. IAM Identity Center was the alternative. It needs a console step to enable and an emailed invite per user, for one developer.
+- 2026-11-22: The developer gives the tool the root user, and the tool uses it once. AWS does not let root assume roles, so bootstrap turns the root sign-in into an organization and an operator IAM user, and every other command signs in as the operator with `aws login`. IAM Identity Center was the alternative. It needs a console step to enable and an emailed invite per user, for one developer. Superseded on 2026-11-23.
 - 2026-11-22: Account creation is a P0 command (R16), not only a step inside a move. Accounts are referred to by name everywhere, and project configs never hold an account ID.
 - 2026-11-22: The kit is a Bun CLI whose every command prints one JSON document, and whose help is data (R17). Agents call it from any repo on the machine.
 - 2026-11-22: Plan creates a CloudFormation change set without running it, and deploy runs that change set by name. AWS then guarantees what runs is what was shown. The template hash check from 2026-10-03 still applies, so the code in the repo matches what deploys.
@@ -184,3 +202,8 @@ Move: ask to give a project stage its own account. The agent shows a plan per re
 - 2026-11-22: Recipes for S3 and CloudFront ship in the first release. The pattern was already written by hand in five earlier projects, which passes the two-projects rule. They follow the developer's storage standard: private buckets, Origin Access Control, bucket policies scoped to one distribution, and HTTPS only.
 - 2026-11-22: Budget amount and alert address are machine settings. The budget defaults to $100 a month per account, with email at 50, 80, and 100 percent and at a forecast of 100.
 - 2026-11-23: The repo is public under the MIT license. The agent skill is then copied into the developer's public skills repo the same way as other public skills, from one source, and anyone can install the CLI. Examples, tests, and docs name no client or private project, and the first release starts from a single clean commit.
+- 2026-11-23: Sign-in moves to IAM Identity Center, reversing the operator user from 2026-11-22. AWS's Agent Toolkit puts an MCP server and skills on the machine that call any AWS API with whatever profile they find, so the limits have to live in AWS. Identity Center gives one sign-in for every account, a profile per account that every AWS tool understands, a read-only permission set for agents, and no IAM user with a password. The cost is two console steps, once.
+- 2026-11-23: The kit's own session is the admin permission set in the management account, and it assumes `OrganizationAccountAccessRole` in member accounts. A new account is reachable that way as soon as it exists, before its Identity Center access is provisioned.
+- 2026-11-23: Guardrails start as one service control policy at the organization root: no leaving the organization, no member root user, and no changes to the access role. Region limits and a block on IAM access keys wait. A wrong list of global services would break CloudFront and ACM, and the Convex question may need a scoped key.
+- 2026-11-23: Control Tower is skipped. It adds a log archive account, an audit account, and AWS Config charges in every account. Organizations, Identity Center, and one service control policy give one developer the guardrails they need.
+- 2026-11-23: AWS's Agent Toolkit supplies service knowledge and docs. Its service skills stay installed. `launch-with-aws` and `signing-in-to-aws` are removed, because they deploy and sign in outside the kit. The AWS MCP Server signs in with a read-only profile.

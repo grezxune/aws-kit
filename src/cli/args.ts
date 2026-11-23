@@ -5,7 +5,7 @@ import type { CommandDef } from "./registry";
 
 /** Flags every command takes. */
 export const GlobalOptions = z.object({
-  profile: z.string().min(1).optional().describe("AWS profile to use instead of the configured operator profile"),
+  profile: z.string().min(1).optional().describe("AWS profile to use instead of the profile setting"),
 });
 
 type BaseType = "string" | "boolean" | "number" | "array" | "enum";

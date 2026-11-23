@@ -80,9 +80,11 @@ export const bootstrap = defineCommand({
       account: session.accountId,
       steps: results,
       ...summary,
-      next: summary.pending.length
-        ? ["Do each manual step above, then run aws-kit bootstrap again. Steps that would change something need --yes."]
-        : [
+      next: summary.failed.length
+        ? ["A step failed. Its detail above says why. Fix it, then run aws-kit bootstrap again."]
+        : summary.pending.length
+          ? ["Do each manual step above, then run aws-kit bootstrap again. Steps that would change something need --yes."]
+          : [
             "Root only, once: in the AWS console, Account, turn on IAM user and role access to Billing information. Costs in aws-kit list need it.",
             `Sign in through Identity Center: aws sso login --profile ${config.profile}. The first sign-in asks you to register an MFA device.`,
             "Check with: aws-kit doctor",

@@ -10,7 +10,7 @@ import {
   type Root,
   UpdatePolicyCommand,
 } from "@aws-sdk/client-organizations";
-import { isAwsError } from "./errors";
+import { isAwsError, KitError } from "./errors";
 import type { Step } from "./steps";
 
 export const GUARDRAIL_POLICY = "aws-kit-guardrails";
@@ -66,8 +66,10 @@ async function findPolicy(orgs: OrganizationsClient): Promise<string | null> {
   }
 }
 
+const scpOn = (root: Root | null) => Boolean(root?.PolicyTypes?.some((type) => type.Type === SCP && type.Status === "ENABLED"));
+
 /** Steps that turn on service control policies, create or update the kit's policy, and attach it to the organization root. */
-export function guardrailSteps(orgs: OrganizationsClient, memberRole: string): Step[] {
+export function guardrailSteps(orgs: OrganizationsClient, memberRole: string, options: { pollMs?: number } = {}): Step[] {
   const document = guardrailDocument(memberRole);
   const content = JSON.stringify(document);
   let policyId: string | null = null;
@@ -76,13 +78,19 @@ export function guardrailSteps(orgs: OrganizationsClient, memberRole: string): S
       id: "scp-enabled",
       async check() {
         const root = await orgRoot(orgs);
-        if (root?.PolicyTypes?.some((type) => type.Type === SCP && type.Status === "ENABLED")) return { needed: false, detail: "Service control policies are on" };
+        if (scpOn(root)) return { needed: false, detail: "Service control policies are on" };
+        if (root?.PolicyTypes?.some((type) => type.Type === SCP && type.Status === "PENDING_ENABLE")) return { needed: true, manual: true, detail: "AWS is still turning on service control policies. Run this command again in a minute." };
         return { needed: true, detail: "Turn on service control policies for the organization." };
       },
       async apply() {
         const root = await orgRoot(orgs);
         await orgs.send(new EnablePolicyTypeCommand({ RootId: root?.Id, PolicyType: SCP }));
-        return "Turned on service control policies";
+        // AWS turns the policy type on in the background. Attaching a policy before it finishes fails.
+        for (let attempt = 0; attempt < 60; attempt++) {
+          if (scpOn(await orgRoot(orgs))) return "Turned on service control policies";
+          await Bun.sleep(options.pollMs ?? 2000);
+        }
+        throw new KitError("scp_pending", "AWS has not finished turning on service control policies.", "Run this command again in a few minutes.");
       },
     },
     {

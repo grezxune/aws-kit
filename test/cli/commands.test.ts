@@ -85,7 +85,9 @@ describe("bootstrap", () => {
   test("with --yes and Identity Center on, sets up guardrails, permission sets, access, and profiles", async () => {
     asRoot();
     orgs.on(DescribeOrganizationCommand).resolves({ Organization: { Id: "o-abc", MasterAccountId: "111111111111", FeatureSet: "ALL" } });
-    orgs.on(ListRootsCommand).resolves({ Roots: [{ Id: "r-1", PolicyTypes: [] }] });
+    orgs.on(ListRootsCommand)
+      .resolvesOnce({ Roots: [{ Id: "r-1", PolicyTypes: [] }] })
+      .resolves({ Roots: [{ Id: "r-1", PolicyTypes: [{ Type: "SERVICE_CONTROL_POLICY", Status: "ENABLED" }] }] });
     orgs.on(ListPoliciesCommand).resolves({ Policies: [] });
     orgs.on(CreatePolicyCommand).resolves({ Policy: { PolicySummary: { Id: "p-1" } } });
     orgs.on(ListPoliciesForTargetCommand).resolves({ Policies: [] });

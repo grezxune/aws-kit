@@ -1,0 +1,4 @@
+node_modules/
+.aws-kit/
+cdk.out/
+.DS_Store

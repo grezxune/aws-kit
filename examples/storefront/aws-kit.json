@@ -1,0 +1,8 @@
+{
+  "project": "shop",
+  "region": "us-east-1",
+  "stages": {
+    "dev": { "account": "shop" },
+    "prod": { "account": "shop" }
+  }
+}

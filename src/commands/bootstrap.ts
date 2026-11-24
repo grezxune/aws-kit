@@ -86,10 +86,22 @@ export const bootstrap = defineCommand({
           ? ["Do each manual step above, then run aws-kit bootstrap again. Steps that would change something need --yes."]
           : [
             "Root only, once: in the AWS console, Account, turn on IAM user and role access to Billing information. Costs in aws-kit list need it.",
-            `Sign in through Identity Center: aws sso login --profile ${config.profile}. The first sign-in asks you to register an MFA device.`,
+            ...(await signInSteps(idc, config.profile)),
             "Check with: aws-kit doctor",
             `Sign root out: aws logout --profile ${profile}. Delete any root access key in the console, under Security credentials.`,
           ],
     };
   },
 });
+
+/** The first sign-in, with the portal and username the earlier steps already looked up. */
+async function signInSteps(idc: IdentityCenter, profile: string): Promise<string[]> {
+  const instance = await idc.requireInstance();
+  const lookup = await idc.getUser();
+  const username = "user" in lookup ? lookup.user.name : "your Identity Center username";
+  return [
+    `Sign in through Identity Center: aws sso login --profile ${profile}. It opens your sign-in portal, ${instance.startUrl}.`,
+    `On that portal, sign in with the username ${username}. The usual AWS console sign-in page is for root and IAM users, and it cannot sign you in.`,
+    "The first sign-in sets your password and registers an MFA device. The command waits about 10 minutes. If it times out first, run it again.",
+  ];
+}

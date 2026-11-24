@@ -115,7 +115,10 @@ describe("bootstrap", () => {
     expect(written).toContain("[sso-session aws-kit]\nsso_start_url = https://d-1234567890.awsapps.com/start");
     expect(written).toContain("[profile aws-kit]\nsso_session = aws-kit\nsso_account_id = 111111111111\nsso_role_name = AwsKitAdmin");
     expect(written).toContain("[profile aws-kit-read]\nsso_session = aws-kit\nsso_account_id = 111111111111\nsso_role_name = AwsKitReadOnly");
-    expect((result.next as string[]).join(" ")).toContain("aws sso login --profile aws-kit");
+    const next = (result.next as string[]).join(" ");
+    expect(next).toContain("aws sso login --profile aws-kit");
+    expect(next).toContain("https://d-1234567890.awsapps.com/start");
+    expect(next).toContain("the username me.");
   });
 });
 

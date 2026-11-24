@@ -50,7 +50,7 @@ Service control policies never apply to the management account, so project stack
    - Under Users, add yourself with your email, and choose to send the password setup email. Accept the invite and set a password.
 6. Run `aws-kit bootstrap --yes` again. It creates the permission sets, gives you access, and writes your profiles.
 7. In the AWS console, still as root, under Account, turn on IAM user and role access to Billing information. `aws-kit list --cost` needs it.
-8. Sign in as yourself: `aws sso login --profile aws-kit`. The first sign-in asks you to register an MFA device. Then sign root out with `aws logout --profile aws-kit-root`, and delete any root access key.
+8. Sign in as yourself: `aws sso login --profile aws-kit`. It opens your sign-in portal, the `awsapps.com/start` URL bootstrap prints. Sign in there with your Identity Center username. The usual AWS console sign-in page is for root and IAM users, and it cannot sign you in. The first sign-in sets your password and registers an MFA device. The command waits about 10 minutes, so if it times out first, run it again. Then sign root out with `aws logout --profile aws-kit-root`, and delete any root access key.
 9. Run `aws-kit doctor`. Every check should pass.
 10. Make a shared account for projects without their own:
     ```bash

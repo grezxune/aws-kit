@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-11-23
 
 - Sign-in moves to IAM Identity Center. `bootstrap` creates the `AwsKitAdmin` and `AwsKitReadOnly` permission sets, gives you both in the management account, and writes your AWS profiles. It no longer creates the operator IAM user. One `aws sso login --profile aws-kit` covers every account.
 - `bootstrap` attaches the `aws-kit-guardrails` service control policy to the organization root. Member accounts cannot leave the organization, their root users can do nothing, and no one can change `OrganizationAccountAccessRole`.
@@ -9,6 +9,7 @@
 - `doctor` checks the permission set behind the kit's profile, the guardrails, and access keys stored in `~/.aws/credentials`.
 - Settings: `operatorProfile` and `operatorUser` are gone. New settings: `profile`, `ssoRegion`, `ssoStartUrl`, `ssoUser`, `adminPermissionSet`, and `readPermissionSet`.
 - New account names cannot be `management`, `read`, or `root`, because profile names use them.
+- When `bootstrap` finishes, its sign-in steps name your portal URL and username, and say to retry `aws sso login` if the first sign-in outlasts it.
 
 ## 0.1.0 - 2026-11-23
 

@@ -29,7 +29,7 @@ function help(topic: string[]): Record<string, unknown> {
     if (!found) throw new KitError("unknown_command", `No command ${topic.join(" ")}.`, "aws-kit help lists them.");
     return { command: describeCommand(found.def) };
   }
-  return { usage: USAGE, version: packageJson.version, globalFlags: [{ flag: "--profile", description: "AWS profile to use instead of the configured operator profile" }], commands: COMMANDS.map(describeCommand) };
+  return { usage: USAGE, version: packageJson.version, globalFlags: [{ flag: "--profile", description: "AWS profile to use instead of the profile setting" }], commands: COMMANDS.map(describeCommand) };
 }
 
 export async function main(argv: string[]): Promise<number> {

@@ -1,31 +1,32 @@
-import { AttachUserPolicyCommand, CreateUserCommand, GetLoginProfileCommand, GetUserCommand, IAMClient, ListAttachedUserPoliciesCommand, ListMFADevicesCommand } from "@aws-sdk/client-iam";
 import { CreateOrganizationCommand } from "@aws-sdk/client-organizations";
 import { z } from "zod";
 import { log } from "../cli/output";
 import { defineCommand } from "../cli/registry";
 import { describeOrg, type Org } from "../core/accounts";
 import { profileSession } from "../core/credentials";
-import { isAwsError, KitError } from "../core/errors";
+import { KitError } from "../core/errors";
+import { guardrailSteps } from "../core/guardrails";
+import { accessStep, ADMIN_POLICY, IdentityCenter, permissionSetStep, profilesStep, READ_POLICY } from "../core/identity-center";
 import { orgClient } from "../core/sessions";
 import { runSteps, type Step, summarize } from "../core/steps";
 
-const ADMIN_POLICY = "arn:aws:iam::aws:policy/AdministratorAccess";
 export const KIT_TAG = { Key: "managed-by", Value: "aws-kit" };
 
 export const bootstrap = defineCommand({
   name: "bootstrap",
-  summary: "Run once as root: create the organization and the operator user that every other command signs in as.",
+  summary: "Run as root: create the organization, the guardrail policy, and the Identity Center permission sets, give you access to the management account, and write your AWS profiles. Rerun after each console step it reports.",
   mutates: true,
   options: z.object({
     yes: z.boolean().default(false).describe("Make the changes. Without it, only report them"),
     profile: z.string().optional().describe("Profile signed in as root. Defaults to the rootProfile setting"),
   }),
   async run(options, ctx) {
-    const profile = options.profile ?? ctx.config.rootProfile;
-    const session = await profileSession(profile, ctx.config.region);
+    const { config } = ctx;
+    const profile = options.profile ?? config.rootProfile;
+    const session = await profileSession(profile, config.region);
     const orgs = orgClient(session);
-    const iam = new IAMClient({ region: ctx.config.region, credentials: session.credentials });
-    const user = ctx.config.operatorUser;
+    const idc = new IdentityCenter(session, config);
+    const management = { id: session.accountId, name: "management", management: true };
     let org: Org | null = null;
 
     const steps: Step[] = [
@@ -35,7 +36,7 @@ export const bootstrap = defineCommand({
           org = await describeOrg(orgs);
           if (!org) return { needed: true, detail: `Create an organization with ${session.accountId} as its management account.` };
           if (org.managementAccountId !== session.accountId) throw new KitError("not_management_account", `${session.accountId} is a member of organization ${org.id}. Run bootstrap in its management account, ${org.managementAccountId}.`);
-          if (org.featureSet !== "ALL") return { needed: true, manual: true, detail: "Enable all features in the AWS Organizations console. Account creation needs them." };
+          if (org.featureSet !== "ALL") return { needed: true, manual: true, detail: "Enable all features in the AWS Organizations console. Account creation and guardrails need them." };
           return { needed: false, detail: `Organization ${org.id}` };
         },
         async apply() {
@@ -43,39 +44,32 @@ export const bootstrap = defineCommand({
           return `Created organization ${created.Organization?.Id}`;
         },
       },
+      ...guardrailSteps(orgs, config.memberRole),
       {
-        id: "operator-user",
+        id: "identity-center",
         async check() {
-          const found = await iam.send(new GetUserCommand({ UserName: user })).catch((error: unknown) => (isAwsError(error, "NoSuchEntityException", "NoSuchEntity") ? null : Promise.reject(error)));
-          return found ? { needed: false, detail: found.User?.Arn ?? user } : { needed: true, detail: `Create IAM user ${user}.` };
-        },
-        async apply() {
-          const created = await iam.send(new CreateUserCommand({ UserName: user, Tags: [KIT_TAG] }));
-          return `Created ${created.User?.Arn}`;
+          const instance = await idc.getInstance();
+          if (instance) return { needed: false, detail: `Identity Center in ${idc.region}, sign-in at ${instance.startUrl}` };
+          return {
+            needed: true,
+            manual: true,
+            detail: `Turn on IAM Identity Center: open the IAM Identity Center console in ${idc.region} and choose Enable, for the organization. AWS allows this only in the console. If you turned it on in another region, set it with aws-kit config set ssoRegion <region>.`,
+          };
         },
       },
       {
-        id: "operator-admin",
+        id: "identity-center-user",
         async check() {
-          const attached = await iam.send(new ListAttachedUserPoliciesCommand({ UserName: user })).catch((error: unknown) => (isAwsError(error, "NoSuchEntityException", "NoSuchEntity") ? null : Promise.reject(error)));
-          const has = attached?.AttachedPolicies?.some((policy) => policy.PolicyArn === ADMIN_POLICY);
-          return has ? { needed: false, detail: "AdministratorAccess attached" } : { needed: true, detail: `Attach AdministratorAccess to ${user}.` };
-        },
-        async apply() {
-          await iam.send(new AttachUserPolicyCommand({ UserName: user, PolicyArn: ADMIN_POLICY }));
-          return "Attached AdministratorAccess";
+          if (!(await idc.getInstance())) return { needed: true, manual: true, detail: "Waits for IAM Identity Center to be turned on." };
+          const lookup = await idc.getUser();
+          return "user" in lookup ? { needed: false, detail: `You sign in as ${lookup.user.name}` } : { needed: true, manual: true, detail: lookup.problem };
         },
       },
-      {
-        id: "operator-console-sign-in",
-        async check() {
-          const profileFound = await iam.send(new GetLoginProfileCommand({ UserName: user })).then(() => true, () => false);
-          if (!profileFound) return { needed: true, manual: true, detail: `In the IAM console, open user ${user}, Security credentials, and enable console access with a password from your password manager.` };
-          const mfa = await iam.send(new ListMFADevicesCommand({ UserName: user })).catch(() => null);
-          if (!mfa?.MFADevices?.length) return { needed: true, manual: true, detail: `In the IAM console, add a passkey or MFA device to ${user}.` };
-          return { needed: false, detail: "Console sign-in and MFA are on" };
-        },
-      },
+      permissionSetStep(idc, config.adminPermissionSet, ADMIN_POLICY),
+      permissionSetStep(idc, config.readPermissionSet, READ_POLICY),
+      accessStep(idc, management, config.adminPermissionSet, { setMadeEarlier: true }),
+      accessStep(idc, management, config.readPermissionSet, { setMadeEarlier: true }),
+      profilesStep(idc, async () => [management]),
     ];
 
     const results = await runSteps(steps, { apply: options.yes, log });
@@ -86,12 +80,28 @@ export const bootstrap = defineCommand({
       account: session.accountId,
       steps: results,
       ...summary,
-      next: [
-        "Root only, once: in the AWS console, Account, turn on IAM user and role access to Billing information. Costs in aws-kit list need it.",
-        `Install AWS CLI 2.32 or later, then sign in as ${user}: aws login --profile ${ctx.config.operatorProfile}`,
-        "Check with: aws-kit doctor",
-        `Sign root out: aws logout --profile ${profile}. Delete any root access key in the console, Security credentials.`,
-      ],
+      next: summary.failed.length
+        ? ["A step failed. Its detail above says why. Fix it, then run aws-kit bootstrap again."]
+        : summary.pending.length
+          ? ["Do each manual step above, then run aws-kit bootstrap again. Steps that would change something need --yes."]
+          : [
+            "Root only, once: in the AWS console, Account, turn on IAM user and role access to Billing information. Costs in aws-kit list need it.",
+            ...(await signInSteps(idc, config.profile)),
+            "Check with: aws-kit doctor",
+            `Sign root out: aws logout --profile ${profile}. Delete any root access key in the console, under Security credentials.`,
+          ],
     };
   },
 });
+
+/** The first sign-in, with the portal and username the earlier steps already looked up. */
+async function signInSteps(idc: IdentityCenter, profile: string): Promise<string[]> {
+  const instance = await idc.requireInstance();
+  const lookup = await idc.getUser();
+  const username = "user" in lookup ? lookup.user.name : "your Identity Center username";
+  return [
+    `Sign in through Identity Center: aws sso login --profile ${profile}. It opens your sign-in portal, ${instance.startUrl}.`,
+    `On that portal, sign in with the username ${username}. The usual AWS console sign-in page is for root and IAM users, and it cannot sign you in.`,
+    "The first sign-in sets your password and registers an MFA device. The command waits about 10 minutes. If it times out first, run it again.",
+  ];
+}

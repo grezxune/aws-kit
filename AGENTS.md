@@ -10,7 +10,10 @@ A local CLI that agents run to create AWS accounts and provision any AWS resourc
 
 ## Project notes
 - The PRD is `prds/aws-kit.md`. Reference its requirement IDs in commits.
-- Identity: root runs `bootstrap` once, which creates the organization and the operator IAM user. AWS does not let root assume roles, so every other command signs in as the operator (`aws login --profile aws-kit`) and assumes `OrganizationAccountAccessRole` in member accounts.
+- Identity: root runs `bootstrap`, which creates the organization, the guardrail policy, and the Identity Center permission sets, and writes the AWS profiles. AWS does not let root assume roles, so every other command signs in through Identity Center (`aws sso login --profile aws-kit`) with the admin permission set and assumes `OrganizationAccountAccessRole` in member accounts.
+- Agents read by default: `exec` and each account's `-read` profile use the read-only permission set. Changes go through the kit's commands.
+- Guardrails AWS enforces live in one service control policy, `src/core/guardrails.ts`. Change it there, and bootstrap updates the attached policy.
+- The kit owns one managed block in `~/.aws/config` (`src/core/aws-profiles.ts`). It never edits a section the person wrote outside that block.
 - The CLI contract: stdout is one JSON document, `{ ok: true, ... }` or `{ ok: false, error: { code, message, hint } }`. Progress and child process output go to stderr. `exec` is the one passthrough.
 - A command that changes AWS or files sets `mutates` and only reports until it gets `--yes`.
 - `plan` creates a CloudFormation change set and a plan record holding the template hash. `deploy` runs only that change set, and only while the code still synthesizes to that hash (R6).

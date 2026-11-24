@@ -82,7 +82,7 @@ describe("helpers", () => {
     expect(envNameOf("PhotosUrl")).toBe("PHOTOS_URL");
   });
 
-  test("project init pins the kit to this version over SSH", () => {
+  test("project init pins the kit to this version from GitHub", () => {
     const files = scaffold("demo", "demo", ["dev"]);
     expect(JSON.parse(files["package.json"] ?? "{}").dependencies["aws-kit"]).toBe(`github:grezxune/aws-kit#v${packageJson.version}`);
     expect(files[".gitignore"]).toContain(".aws-kit/");

@@ -1,6 +1,31 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { AttachUserPolicyCommand, CreateUserCommand, GetLoginProfileCommand, GetUserCommand, IAMClient, ListAttachedUserPoliciesCommand } from "@aws-sdk/client-iam";
-import { CreateAccountCommand, CreateOrganizationCommand, DescribeCreateAccountStatusCommand, DescribeOrganizationCommand, ListAccountsCommand, OrganizationsClient } from "@aws-sdk/client-organizations";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { IdentitystoreClient, ListUsersCommand } from "@aws-sdk/client-identitystore";
+import {
+  AttachPolicyCommand,
+  CreateAccountCommand,
+  CreateOrganizationCommand,
+  CreatePolicyCommand,
+  DescribeCreateAccountStatusCommand,
+  DescribeOrganizationCommand,
+  EnablePolicyTypeCommand,
+  ListAccountsCommand,
+  ListPoliciesCommand,
+  ListPoliciesForTargetCommand,
+  ListRootsCommand,
+  OrganizationsClient,
+} from "@aws-sdk/client-organizations";
+import {
+  AttachManagedPolicyToPermissionSetCommand,
+  CreateAccountAssignmentCommand,
+  CreatePermissionSetCommand,
+  DescribeAccountAssignmentCreationStatusCommand,
+  ListAccountAssignmentsCommand,
+  ListInstancesCommand,
+  ListPermissionSetsCommand,
+  SSOAdminClient,
+} from "@aws-sdk/client-sso-admin";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { mockClient } from "aws-sdk-client-mock";
 import { accountCreate } from "../../src/commands/account";
@@ -8,71 +33,111 @@ import { bootstrap } from "../../src/commands/bootstrap";
 import { ConfigSchema } from "../../src/core/config";
 import { assumedSession } from "../../src/core/credentials";
 import type { KitError } from "../../src/core/errors";
+import { guardrailDocument } from "../../src/core/guardrails";
 import { fakeAwsEnv } from "../support/aws-env";
 
 const sts = mockClient(STSClient);
 const orgs = mockClient(OrganizationsClient);
-const iam = mockClient(IAMClient);
+const sso = mockClient(SSOAdminClient);
+const store = mockClient(IdentitystoreClient);
 let env: ReturnType<typeof fakeAwsEnv>;
-const noSuchEntity = () => Object.assign(new Error("not found"), { name: "NoSuchEntityException" });
+const notInUse = () => Object.assign(new Error("no org"), { name: "AWSOrganizationsNotInUseException" });
 const config = ConfigSchema.parse({ accountEmail: "me+aws-{name}@example.com" });
 
 beforeAll(() => (env = fakeAwsEnv(["aws-kit-root", "aws-kit"])));
 afterAll(() => env.restore());
-afterEach(() => [sts, orgs, iam].forEach((mock) => mock.reset()));
+const user = (UserId: string, UserName: string) => ({ UserId, UserName, IdentityStoreId: "d-1234567890", UserArn: `arn:aws:identitystore::111111111111:user/${UserId}`, Revision: "1" });
+afterEach(() => {
+  [sts, orgs, sso, store].forEach((mock) => mock.reset());
+  writeFileSync(join(env.dir, "config"), "");
+});
 
 describe("bootstrap", () => {
   const asRoot = () => sts.on(GetCallerIdentityCommand).resolves({ Account: "111111111111", Arn: "arn:aws:iam::111111111111:root" });
+  const steps = (result: Record<string, unknown>) => (result.steps as { id: string; action: string }[]).map((step) => `${step.id}:${step.action}`);
 
-  test("reports the organization and operator user it would create, and changes nothing", async () => {
+  test("from a standalone account, reports what it would create and the console steps, and changes nothing", async () => {
     asRoot();
-    orgs.on(DescribeOrganizationCommand).rejects(Object.assign(new Error("no org"), { name: "AWSOrganizationsNotInUseException" }));
-    iam.on(GetUserCommand).rejects(noSuchEntity());
-    iam.on(ListAttachedUserPoliciesCommand).rejects(noSuchEntity());
-    iam.on(GetLoginProfileCommand).rejects(noSuchEntity());
+    orgs.on(DescribeOrganizationCommand).rejects(notInUse());
+    orgs.on(ListRootsCommand).rejects(notInUse());
+    orgs.on(ListPoliciesCommand).rejects(notInUse());
+    sso.on(ListInstancesCommand).resolves({ Instances: [] });
     const result = await bootstrap.run({ yes: false }, { config, positionals: [] });
     expect(result.rootSession).toBe(true);
-    expect((result.steps as { id: string; action: string }[]).map((step) => `${step.id}:${step.action}`)).toEqual([
+    expect(steps(result)).toEqual([
       "organization:would-change",
-      "operator-user:would-change",
-      "operator-admin:would-change",
-      "operator-console-sign-in:manual",
+      "scp-enabled:would-change",
+      "guardrail-policy:would-change",
+      "guardrail-attached:would-change",
+      "identity-center:manual",
+      "identity-center-user:manual",
+      "permission-set:AwsKitAdmin:manual",
+      "permission-set:AwsKitReadOnly:manual",
+      "access:AwsKitAdmin:manual",
+      "access:AwsKitReadOnly:manual",
+      "aws-profiles:manual",
     ]);
     expect(orgs.commandCalls(CreateOrganizationCommand)).toHaveLength(0);
-    expect(iam.commandCalls(CreateUserCommand)).toHaveLength(0);
+    expect(orgs.commandCalls(CreatePolicyCommand)).toHaveLength(0);
+    expect(readFileSync(join(env.dir, "config"), "utf8")).toBe("");
   });
 
-  test("with --yes creates them", async () => {
+  test("with --yes and Identity Center on, sets up guardrails, permission sets, access, and profiles", async () => {
     asRoot();
-    orgs.on(DescribeOrganizationCommand).rejects(Object.assign(new Error("no org"), { name: "AWSOrganizationsNotInUseException" }));
-    orgs.on(CreateOrganizationCommand).resolves({ Organization: { Id: "o-abc" } });
-    iam.on(GetUserCommand).rejects(noSuchEntity());
-    iam.on(CreateUserCommand).resolves({ User: { Arn: "arn:aws:iam::111111111111:user/aws-kit-operator", UserName: "aws-kit-operator", UserId: "x", Path: "/", CreateDate: new Date() } });
-    iam.on(ListAttachedUserPoliciesCommand).resolves({ AttachedPolicies: [] });
-    iam.on(GetLoginProfileCommand).rejects(noSuchEntity());
+    orgs.on(DescribeOrganizationCommand).resolves({ Organization: { Id: "o-abc", MasterAccountId: "111111111111", FeatureSet: "ALL" } });
+    orgs.on(ListRootsCommand)
+      .resolvesOnce({ Roots: [{ Id: "r-1", PolicyTypes: [] }] })
+      .resolves({ Roots: [{ Id: "r-1", PolicyTypes: [{ Type: "SERVICE_CONTROL_POLICY", Status: "ENABLED" }] }] });
+    orgs.on(ListPoliciesCommand).resolves({ Policies: [] });
+    orgs.on(CreatePolicyCommand).resolves({ Policy: { PolicySummary: { Id: "p-1" } } });
+    orgs.on(ListPoliciesForTargetCommand).resolves({ Policies: [] });
+    sso.on(ListInstancesCommand).resolves({ Instances: [{ InstanceArn: "arn:aws:sso:::instance/ssoins-1", IdentityStoreId: "d-1234567890", Status: "ACTIVE" }] });
+    sso.on(ListPermissionSetsCommand).resolves({ PermissionSets: [] });
+    sso.on(CreatePermissionSetCommand).callsFake((input: { Name: string }) => ({ PermissionSet: { PermissionSetArn: `arn:aws:sso:::permissionSet/ssoins-1/${input.Name}` } }));
+    sso.on(ListAccountAssignmentsCommand).resolves({ AccountAssignments: [] });
+    sso.on(CreateAccountAssignmentCommand).resolves({ AccountAssignmentCreationStatus: { RequestId: "req-1" } });
+    sso.on(DescribeAccountAssignmentCreationStatusCommand).resolves({ AccountAssignmentCreationStatus: { Status: "SUCCEEDED" } });
+    store.on(ListUsersCommand).resolves({ Users: [user("u-1", "me")] });
+
     const result = await bootstrap.run({ yes: true }, { config, positionals: [] });
-    expect(result.changed).toBe(true);
-    expect(orgs.commandCalls(CreateOrganizationCommand)[0]?.args[0].input).toEqual({ FeatureSet: "ALL" });
-    expect(iam.commandCalls(AttachUserPolicyCommand)[0]?.args[0].input.PolicyArn).toBe("arn:aws:iam::aws:policy/AdministratorAccess");
+    expect(result.failed).toEqual([]);
+    expect(result.pending).toEqual([]);
+    expect(orgs.commandCalls(EnablePolicyTypeCommand)[0]?.args[0].input).toEqual({ RootId: "r-1", PolicyType: "SERVICE_CONTROL_POLICY" });
+    expect(JSON.parse(orgs.commandCalls(CreatePolicyCommand)[0]?.args[0].input.Content ?? "")).toEqual(guardrailDocument("OrganizationAccountAccessRole"));
+    expect(orgs.commandCalls(AttachPolicyCommand)[0]?.args[0].input).toEqual({ PolicyId: "p-1", TargetId: "r-1" });
+    expect(sso.commandCalls(CreatePermissionSetCommand).map((call) => call.args[0].input.Name)).toEqual(["AwsKitAdmin", "AwsKitReadOnly"]);
+    expect(sso.commandCalls(AttachManagedPolicyToPermissionSetCommand).map((call) => call.args[0].input.ManagedPolicyArn)).toEqual(["arn:aws:iam::aws:policy/AdministratorAccess", "arn:aws:iam::aws:policy/ReadOnlyAccess"]);
+    expect(sso.commandCalls(CreateAccountAssignmentCommand).map((call) => call.args[0].input)).toEqual([
+      expect.objectContaining({ TargetId: "111111111111", PrincipalId: "u-1", PermissionSetArn: "arn:aws:sso:::permissionSet/ssoins-1/AwsKitAdmin" }),
+      expect.objectContaining({ TargetId: "111111111111", PrincipalId: "u-1", PermissionSetArn: "arn:aws:sso:::permissionSet/ssoins-1/AwsKitReadOnly" }),
+    ]);
+    const written = readFileSync(join(env.dir, "config"), "utf8");
+    expect(written).toContain("[sso-session aws-kit]\nsso_start_url = https://d-1234567890.awsapps.com/start");
+    expect(written).toContain("[profile aws-kit]\nsso_session = aws-kit\nsso_account_id = 111111111111\nsso_role_name = AwsKitAdmin");
+    expect(written).toContain("[profile aws-kit-read]\nsso_session = aws-kit\nsso_account_id = 111111111111\nsso_role_name = AwsKitReadOnly");
+    const next = (result.next as string[]).join(" ");
+    expect(next).toContain("aws sso login --profile aws-kit");
+    expect(next).toContain("https://d-1234567890.awsapps.com/start");
+    expect(next).toContain("the username me.");
   });
 });
 
 describe("account create", () => {
-  const asOperator = () => {
-    sts.on(GetCallerIdentityCommand).resolves({ Account: "111111111111", Arn: "arn:aws:iam::111111111111:user/aws-kit-operator" });
+  const asKit = () => {
+    sts.on(GetCallerIdentityCommand).resolves({ Account: "111111111111", Arn: "arn:aws:sts::111111111111:assumed-role/AWSReservedSSO_AwsKitAdmin_0123456789abcdef/me" });
     orgs.on(DescribeOrganizationCommand).resolves({ Organization: { Id: "o-abc", MasterAccountId: "111111111111", FeatureSet: "ALL" } });
     orgs.on(ListAccountsCommand).resolves({ Accounts: [{ Id: "111111111111", Name: "main", Email: "me@example.com", State: "ACTIVE" }] });
   };
 
   test("without --yes only describes the account", async () => {
-    asOperator();
+    asKit();
     const result = await accountCreate.run({ name: "shop", yes: false }, { config, positionals: [] });
     expect(result.wouldCreate).toEqual({ name: "shop", email: "me+aws-shop@example.com", role: "OrganizationAccountAccessRole" });
     expect(orgs.commandCalls(CreateAccountCommand)).toHaveLength(0);
   });
 
   test("returns an existing account instead of making a second", async () => {
-    asOperator();
+    asKit();
     orgs.on(ListAccountsCommand).resolves({ Accounts: [{ Id: "222222222222", Name: "shop", Email: "x@example.com", State: "ACTIVE" }] });
     const result = await accountCreate.run({ name: "shop", yes: true }, { config, positionals: [] });
     expect(result.changed).toBe(false);
@@ -80,11 +145,17 @@ describe("account create", () => {
   });
 
   test("with --yes creates it", async () => {
-    asOperator();
+    asKit();
     orgs.on(CreateAccountCommand).resolves({ CreateAccountStatus: { Id: "car-1" } });
     orgs.on(DescribeCreateAccountStatusCommand).resolves({ CreateAccountStatus: { State: "SUCCEEDED", AccountId: "222222222222" } });
     const result = await accountCreate.run({ name: "shop", yes: true }, { config, positionals: [] });
     expect(result.account).toEqual({ id: "222222222222", name: "shop", email: "me+aws-shop@example.com" });
+  });
+
+  test("refuses names that profile names already use", () => {
+    expect(accountCreate.options.safeParse({ name: "read" }).success).toBe(false);
+    expect(accountCreate.options.safeParse({ name: "root" }).success).toBe(false);
+    expect(accountCreate.options.safeParse({ name: "shop" }).success).toBe(true);
   });
 
   test("refuses a profile outside the management account", async () => {

@@ -53,8 +53,8 @@ function monthToDate(now = new Date()): { Start: string; End: string } {
   return { Start: day(start), End: day(end) };
 }
 
-async function costs(operator: Session) {
-  const ce = new CostExplorerClient({ region: "us-east-1", credentials: operator.credentials });
+async function costs(management: Session) {
+  const ce = new CostExplorerClient({ region: "us-east-1", credentials: management.credentials });
   const query = async (GroupBy: GroupDefinition[]) => {
     const result = await ce.send(new GetCostAndUsageCommand({ TimePeriod: monthToDate(), Granularity: "MONTHLY", Metrics: ["UnblendedCost"], GroupBy }));
     return (result.ResultsByTime?.[0]?.Groups ?? []).map((group) => ({ keys: group.Keys ?? [], usd: Number(group.Metrics?.UnblendedCost?.Amount ?? 0) }));
@@ -99,7 +99,7 @@ export const listCommand = defineCommand({
     let cost: Awaited<ReturnType<typeof costs>> | undefined;
     if (options.cost) {
       try {
-        cost = await costs(view.operator);
+        cost = await costs(view.management);
         for (const row of stacks) row.costUsd = cost.byProjectStage.find((group) => group.project === row.project && group.stage === row.stage)?.usd ?? 0;
       } catch (error) {
         errors.push({ account: "management", message: `Cost Explorer: ${(error as Error).message}` });
